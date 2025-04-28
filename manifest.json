@@ -1,0 +1,19 @@
+{
+  "name": "AvodaPlus CRM",
+  "slug": "avodaplus-crm",
+  "version": "1.0.0",
+  "permissions": ["users:read", "boards:read"],
+  "features": [
+    {
+      "type": "board_view",
+      "name": "AvodaPlus CRM",
+      "component": {
+        "remotePath": "https://fb83b8546222.apps-tunnel.monday.app",
+        "height": 600
+      }
+    }
+  ],
+  "settings": {
+    "oauth2": false
+  }
+}
