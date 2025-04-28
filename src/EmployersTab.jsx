@@ -1,15 +1,18 @@
 import React, { useState, useEffect, useRef } from "react";
 import mondaySdk from "monday-sdk-js";
-import { Button, TextField } from "@vibe/core";
+import { Button, TextField, Loader } from "@vibe/core";
+import { User, ParsedUser, QueryResponse } from "./types";
 
 const monday = mondaySdk();
 
-const EmployersTab = () => {
-  const [context, setContext] = useState(null);
-  const [token, setToken] = useState(localStorage.getItem("avoda_token") || "");
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState("");
-  const [query, setQuery] = useState(
+const EmployersTab: React.FC = () => {
+  const [context, setContext] = useState<any>(null);
+  const [token, setToken] = useState<string>(localStorage.getItem("avoda_token") || "");
+  const [saved, setSaved] = useState<boolean>(false);
+  const [error, setError] = useState<string>("");
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [importProgress, setImportProgress] = useState<number>(0);
+  const [query, setQuery] = useState<string>(
     `query users($limit: Int, $page: Int) {
   users(limit: $limit, page: $page, roles: EMPLOYER) {
     users {
@@ -30,27 +33,21 @@ const EmployersTab = () => {
   }
 }`
   );
-  const [queryResult, setQueryResult] = useState(null);
-  const [parsed, setParsed] = useState([]);
-  const [page, setPage] = useState(0);
-  const [totalFetched, setTotalFetched] = useState(0);
-  const isCancelled = useRef(false);
+  const [queryResult, setQueryResult] = useState<QueryResponse | null>(null);
+  const [parsed, setParsed] = useState<ParsedUser[]>([]);
+  const [page, setPage] = useState<number>(0);
+  const [totalFetched, setTotalFetched] = useState<number>(0);
+  const isCancelled = useRef<boolean>(false);
 
   useEffect(() => {
     monday.get("context").then(res => {
       console.log(res);
       setContext(res.data);
-    }
-    );
+    });
     
     monday.listen("context", (res) => {
       setContext(res.data);
     });
-
-    monday
-      .api(`query { me { id name email } }`)
-      .then((res) => setUser(res.data.me))
-      .catch(() => setError("Failed to load user details."));
   }, []);
 
   const saveToken = () => {
@@ -65,17 +62,26 @@ const EmployersTab = () => {
 
   const runQuery = async () => {
     setError("");
+    setIsLoading(true);
     try {
       const res = await fetch("https://avodaplus-api.noal.org.il/", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { 
+          "Content-Type": "application/json", 
+          Authorization: `Bearer ${token}` 
+        },
         body: JSON.stringify({ query, variables: { limit: 100, page: 1 } })
       });
       const json = await res.json();
       console.log("🟢 Query result:", json);
+      if (json.errors) {
+        throw new Error(json.errors[0].message);
+      }
       setQueryResult(json);
     } catch (e) {
-      setError("Query failed: " + e.message);
+      setError("Query failed: " + (e instanceof Error ? e.message : "Unknown error"));
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -101,7 +107,7 @@ const EmployersTab = () => {
       }));
       setParsed(mapped);
     } catch (e) {
-      setError("Parse error: " + e.message);
+      setError("Parse error: " + (e instanceof Error ? e.message : "Unknown error"));
     }
   };
 
@@ -113,31 +119,39 @@ const EmployersTab = () => {
     isCancelled.current = false;
     setPage(0);
     setTotalFetched(0);
-    let all = [];
+    setIsLoading(true);
+    let all: User[] = [];
     let p = 1;
 
     while (!isCancelled.current) {
       try {
         const res = await fetch("https://avodaplus-api.noal.org.il/", {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          headers: { 
+            "Content-Type": "application/json", 
+            Authorization: `Bearer ${token}` 
+          },
           body: JSON.stringify({ query, variables: { limit: 100, page: p } })
         });
-        const json = await res.json();
+        const json: QueryResponse = await res.json();
         console.log(`🟢 Fetch page ${p} result:`, json);
+        if (json.errors) {
+          throw new Error(json.errors[0].message);
+        }
         const users = json?.data?.users?.users;
         if (!users?.length) break;
         all = all.concat(users);
         setPage(p);
         setTotalFetched(all.length);
         p++;
-      } catch {
+      } catch (e) {
+        setError("Fetch error: " + (e instanceof Error ? e.message : "Unknown error"));
         break;
       }
     }
-    setQueryResult({ data: { users: { users: all } } });
+    setQueryResult({ data: { users: { users: all, count: all.length } } });
     console.log("✅ Finished fetching all employers:", all.length, "users");
-    // parseResult();
+    setIsLoading(false);
   };
 
   useEffect(() => {
@@ -151,8 +165,16 @@ const EmployersTab = () => {
   };
 
   const insertToBoard = async () => {
+    if (!parsed.length) {
+      setError("No data to insert");
+      return;
+    }
+
+    setImportProgress(0);
     const boardId = (await monday.get("context")).data.boardId;
-    for (let u of parsed) {
+    let successCount = 0;
+
+    for (let [index, u] of parsed.entries()) {
       try {
         await monday.api(`mutation {
           create_item(
@@ -176,10 +198,16 @@ const EmployersTab = () => {
             })}
           ) { id }
         }`);
+        successCount++;
       } catch (e) {
-        console.error("Insert failed for", u, e.message);
+        console.error("Insert failed for", u, e instanceof Error ? e.message : "Unknown error");
       }
+      setImportProgress(Math.round((index + 1) / parsed.length * 100));
     }
+
+    setError(successCount === parsed.length 
+      ? `Successfully imported all ${parsed.length} records` 
+      : `Imported ${successCount} out of ${parsed.length} records`);
   };
 
   return (
@@ -187,78 +215,144 @@ const EmployersTab = () => {
       <h3>🧑‍💼 Employers Import</h3>
       <p>You're viewing board ID: <strong>{context?.boardId}</strong></p>
       <br />
-      <TextField label="API Token" value={token} onChange={setToken} />
-      <Button onClick={saveToken} style={{ backgroundColor: '#4caf50', margin: '0.5rem' }}>
-        Save Token {saved && '✅'}
-      </Button>
-      {error && <div style={{ color: 'red', margin: '0.5rem 0' }}>{error}</div>}
+      
+      <div style={{ marginBottom: '1rem' }}>
+        <TextField 
+          label="API Token" 
+          value={token} 
+          onChange={setToken}
+          type="password"
+        />
+        <Button 
+          onClick={saveToken} 
+          style={{ backgroundColor: '#4caf50', margin: '0.5rem' }}
+        >
+          Save Token {saved && '✅'}
+        </Button>
+      </div>
+
+      {error && (
+        <div style={{ 
+          color: error.includes("Successfully") ? 'green' : 'red', 
+          margin: '0.5rem 0',
+          padding: '0.5rem',
+          backgroundColor: error.includes("Successfully") ? '#e8f5e9' : '#ffebee',
+          borderRadius: '4px'
+        }}>
+          {error}
+        </div>
+      )}
 
       <textarea
         value={query}
         onChange={e => setQuery(e.target.value)}
         rows={6}
-        style={{ width: '100%', margin: '0.5rem 0' }}
+        style={{ 
+          width: '100%', 
+          margin: '0.5rem 0',
+          padding: '0.5rem',
+          fontFamily: 'monospace'
+        }}
       />
-      <Button onClick={runQuery} style={{ backgroundColor: '#2196f3', margin: '0.25rem' }}>
-        Run Query
-      </Button>
-      <Button onClick={parseResult} style={{ backgroundColor: '#ff9800', margin: '0.25rem' }}>
-        Parse Result
-      </Button>
 
-      {/* Review Table */}
-      {parsed.length > 0 && (
-        <table style={{ width: '100%', borderCollapse: 'collapse', margin: '1rem 0' }}>
-          <thead>
-            <tr>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>ID</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>First Name</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Last Name</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Phone</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Address</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Email</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Registered</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Last Activity</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Confirmed</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Active Job</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Archived</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Business ID</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Business Name</th>
-              <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Business Branch</th>
-            </tr>
-          </thead>
-          <tbody>
-            {parsed.map((u, idx) => (
-              <tr key={idx}>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.id}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.firstName}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.lastName}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.phone}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.address}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.email}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.createdAt}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.lastActivity}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.isConfirmed ? "✅" : "❌"}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.hasActiveJobListing ? "✅" : "❌"}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.isArchived ? "✅" : "❌"}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.businessId}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.businessName}</td>
-                <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.businessBranch}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+        <Button 
+          onClick={runQuery} 
+          style={{ backgroundColor: '#2196f3' }}
+          disabled={isLoading}
+        >
+          {isLoading ? <Loader size={16} /> : 'Run Query'}
+        </Button>
+        <Button 
+          onClick={parseResult} 
+          style={{ backgroundColor: '#ff9800' }}
+          disabled={!queryResult}
+        >
+          Parse Result
+        </Button>
+        <Button 
+          onClick={fetchAll} 
+          style={{ backgroundColor: '#673ab7' }}
+          disabled={isLoading}
+        >
+          📥 Fetch All
+        </Button>
+        <Button 
+          onClick={stopFetch} 
+          style={{ backgroundColor: '#f44336' }}
+          disabled={!isLoading}
+        >
+          🛑 Stop Fetch
+        </Button>
+      </div>
+
+      {isLoading && (
+        <div style={{ textAlign: 'center', padding: '1rem' }}>
+          <Loader size={32} />
+          <p>Fetching data... Page {page}, Total records: {totalFetched}</p>
+        </div>
       )}
 
-      <Button onClick={fetchAll} style={{ backgroundColor: '#673ab7', margin: '0.25rem' }}>
-        📥 Fetch All
-      </Button>
-      <Button onClick={stopFetch} style={{ backgroundColor: '#f44336', margin: '0.25rem' }}>
-        🛑 Stop Fetch
-      </Button>
-      <Button onClick={insertToBoard} style={{ backgroundColor: '#4caf50', margin: '0.5rem 0' }}>
-        🚀 Insert All to Board
-      </Button>
+      {parsed.length > 0 && (
+        <>
+          <div style={{ 
+            overflowX: 'auto', 
+            maxHeight: '400px',
+            marginBottom: '1rem',
+            border: '1px solid #e0e0e0',
+            borderRadius: '4px'
+          }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead style={{ position: 'sticky', top: 0, backgroundColor: 'white' }}>
+                <tr>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>ID</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>First Name</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Last Name</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Phone</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Address</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Email</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Registered</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Last Activity</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Confirmed</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Active Job</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Archived</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Business ID</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Business Name</th>
+                  <th style={{ border: '1px solid #ccc', padding: '0.5rem' }}>Business Branch</th>
+                </tr>
+              </thead>
+              <tbody>
+                {parsed.map((u, idx) => (
+                  <tr key={idx}>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.id}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.firstName}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.lastName}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.phone}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.address}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.email}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.createdAt}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.lastActivity}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.isConfirmed ? "✅" : "❌"}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.hasActiveJobListing ? "✅" : "❌"}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.isArchived ? "✅" : "❌"}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.businessId}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.businessName}</td>
+                    <td style={{ border: '1px solid #ccc', padding: '0.5rem' }}>{u.businessBranch}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <Button 
+            onClick={insertToBoard} 
+            style={{ backgroundColor: '#4caf50', width: '100%' }}
+          >
+            🚀 Insert All to Board
+            {importProgress > 0 && ` (${importProgress}%)`}
+          </Button>
+        </>
+      )}
     </div>
   );
 };
